@@ -7,7 +7,7 @@ package main
 
 //go:generate core generate -add-types
 
-import (
+import (x
 	"embed"
 	"fmt"
 	"math"
@@ -40,9 +40,11 @@ import (
 )
 
 //go:embed train_ab.tsv train_ac.tsv test_ab.tsv test_ac.tsv test_lure.tsv
+
+// //go:embed train_ep.tsv test_early.tsv test_late.tsv test_lure.tsv
 var content embed.FS
 
-// go:embed *.png README.md
+//go:embed *.png README.md
 // var readme embed.FS
 
 func main() {
@@ -322,7 +324,9 @@ func (ss *Sim) New() {
 
 // Config configures all the elements using the standard functions
 func (ss *Sim) ConfigAll() {
-	ss.OpenPatterns()
+	ss.ConfigPats()
+	ss.SavePatterns()
+	// ss.OpenPatterns()
 	// ss.ConfigPatterns()
 	ss.ConfigEnv()
 	ss.ConfigNet(ss.Net)
