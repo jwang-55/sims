@@ -180,6 +180,18 @@ type Config struct {
 
 	// StopMem is the threshold for stopping learning.
 	StopMem float32 `default:"1"`
+
+	//number of episodes
+	NEpisodes int `default:"10"`
+
+	//length of each episode
+	EpLength int `default:"5"`
+
+	//fraction of context flipped
+	CtxtDrift float32 `default:"0.2"`
+
+	//overlap percentage of items shared across all episodes
+	// PctOverlap float32 `default:"0.2"`
 }
 
 // Sim encapsulates the entire simulation model, and we define all the
@@ -226,10 +238,10 @@ type Sim struct {
 	TestAC *table.Table `new-window:"+" display:"no-inline"`
 
 	// Lure testing patterns to use
-	TestLure *table.Table `new-window:"+" display:"no-inline"`
+	// TestLure *table.Table `new-window:"+" display:"no-inline"`
 
 	// TestAll has all the test items
-	TestAll *table.Table `new-window:"+" display:"no-inline"`
+	// TestAll *table.Table `new-window:"+" display:"no-inline"`
 
 	// Lure pretrain patterns to use
 	PreTrainLure *table.Table `new-window:"+" display:"-"`
@@ -251,6 +263,23 @@ type Sim struct {
 
 	// a list of random seeds to use for each run
 	RandSeeds randx.Seeds `display:"-"`
+
+	//ADDING TABLES TO SIM STRUCT
+
+	//all training episdoes
+	TrainEp *table.Table
+
+	//testing the first item(cue) for an episode
+	TestEarly *table.Table
+
+	//testing a cue from the middle of an episode
+	TestLate *table.Table
+
+	//lure: novel items never seen before in training
+	TestLure *table.Table
+
+	//the test set
+	TestAll *table.Table
 }
 
 // New creates new blank elements and initializes defaults
@@ -265,15 +294,22 @@ func (ss *Sim) New() {
 	ss.Stats.Init()
 	ss.Stats.SetInt("Expt", 0)
 
+	//ADDING EPISODE TABLES
+	ss.TrainEp = &table.Table{}
+	ss.TestEarly = &table.Table{}
+	ss.TestLate = &table.Table{}
+	ss.TestLure = &table.Table{}
+	ss.TestAll = &table.Table{}
+
 	ss.PoolVocab = patgen.Vocab{}
 	ss.TrainAB = &table.Table{}
 	ss.TrainAC = &table.Table{}
 	ss.TestAB = &table.Table{}
 	ss.TestAC = &table.Table{}
 	ss.PreTrainLure = &table.Table{}
-	ss.TestLure = &table.Table{}
+	// ss.TestLure = &table.Table{}
 	ss.TrainAll = &table.Table{}
-	ss.TestAll = &table.Table{}
+	// ss.TestAll = &table.Table{}
 	ss.PretrainMode = false
 
 	ss.RandSeeds.Init(100) // max 100 runs
@@ -307,7 +343,7 @@ func (ss *Sim) ConfigEnv() {
 
 	// note: names must be standard here!
 	trn.Name = etime.Train.String()
-	trn.Config(table.NewIndexView(ss.TrainAB))
+	trn.Config(table.NewIndexView(ss.TrainEp))
 	trn.Validate()
 
 	tst.Name = etime.Test.String()
@@ -427,7 +463,7 @@ func (ss *Sim) InitRandSeed(run int) {
 func (ss *Sim) ConfigLoops() {
 	ls := looper.NewStacks()
 
-	trls := ss.TrainAB.Rows
+	trls := ss.TrainEp.Rows
 	ttrls := ss.TestAll.Rows
 
 	ls.AddStack(etime.Train).AddTime(etime.Run, ss.Config.NRuns).AddTime(etime.Epoch, ss.Config.NEpochs).AddTime(etime.Trial, trls).AddTime(etime.Cycle, 100)
@@ -465,25 +501,25 @@ func (ss *Sim) ConfigLoops() {
 			// Note the +1 so that it doesn't occur at the 0th timestep.
 			ss.RunTestAll()
 
-			// switch to AC
-			trn := ss.Envs.ByMode(etime.Train).(*env.FixedTable)
-			tstEpcLog := ss.Logs.Tables[etime.Scope(etime.Test, etime.Epoch)]
-			epc := ss.Stats.Int("Epoch")
-			abMem := float32(tstEpcLog.Table.Float("ABMem", epc))
-			if (trn.Table.Table.MetaData["name"] == "TrainAB") && (abMem >= ss.Config.StopMem || epc >= ss.Config.NEpochs/2) {
-				ss.Stats.SetInt("FirstPerfect", epc)
-				trn.Config(table.NewIndexView(ss.TrainAC))
-				trn.Validate()
-			}
+			// // switch to AC
+			// trn := ss.Envs.ByMode(etime.Train).(*env.FixedTable)
+			// tstEpcLog := ss.Logs.Tables[etime.Scope(etime.Test, etime.Epoch)]
+			// epc := ss.Stats.Int("Epoch")
+			// abMem := float32(tstEpcLog.Table.Float("ABMem", epc))
+			// if (trn.Table.Table.MetaData["name"] == "TrainAB") && (abMem >= ss.Config.StopMem || epc >= ss.Config.NEpochs/2) {
+			// 	ss.Stats.SetInt("FirstPerfect", epc)
+			// 	trn.Config(table.NewIndexView(ss.TrainAC))
+			// 	trn.Validate()
+			// }
 		}
 	})
 
 	// early stop
-	ls.Loop(etime.Train, etime.Epoch).IsDone.AddBool("ACMemStop", func() bool {
+	ls.Loop(etime.Train, etime.Epoch).IsDone.AddBool("EpMemStop", func() bool {
 		// This is calculated in TrialStats
 		tstEpcLog := ss.Logs.Tables[etime.Scope(etime.Test, etime.Epoch)]
-		acMem := float32(tstEpcLog.Table.Float("ACMem", ss.Stats.Int("Epoch")))
-		stop := acMem >= ss.Config.StopMem
+		firstMem := float32(tstEpcLog.Table.Float("FirstItemMem", ss.Stats.Int("Epoch")))
+		stop := firstMem >= ss.Config.StopMem
 		return stop
 	})
 
@@ -577,48 +613,265 @@ func (ss *Sim) OpenPatAsset(dt *table.Table, fnm, name, desc string) error {
 	return err
 }
 
-func (ss *Sim) OpenPatterns() {
-	ss.OpenPatAsset(ss.TrainAB, "train_ab.tsv", "TrainAB", "AB Training Patterns")
-	ss.OpenPatAsset(ss.TrainAC, "train_ac.tsv", "TrainAC", "AC Training Patterns")
-	ss.OpenPatAsset(ss.TestAB, "test_ab.tsv", "TestAB", "AB Testing Patterns")
-	ss.OpenPatAsset(ss.TestAC, "test_ac.tsv", "TestAC", "AC Testing Patterns")
-	ss.OpenPatAsset(ss.TestLure, "test_lure.tsv", "TestLure", "Lure Testing Patterns")
+// func (ss *Sim) OpenPatterns() {
+// 	ss.OpenPatAsset(ss.TrainAB, "train_ab.tsv", "TrainAB", "AB Training Patterns")
+// 	ss.OpenPatAsset(ss.TrainAC, "train_ac.tsv", "TrainAC", "AC Training Patterns")
+// 	ss.OpenPatAsset(ss.TestAB, "test_ab.tsv", "TestAB", "AB Testing Patterns")
+// 	ss.OpenPatAsset(ss.TestAC, "test_ac.tsv", "TestAC", "AC Testing Patterns")
+// 	ss.OpenPatAsset(ss.TestLure, "test_lure.tsv", "TestLure", "Lure Testing Patterns")
 
-	ss.TestAll = ss.TestAB.Clone()
-	ss.TestAll.SetMetaData("name", "TestAll")
-	ss.TestAll.AppendRows(ss.TestAC)
+//		ss.TestAll = ss.TestAB.Clone()
+//		ss.TestAll.SetMetaData("name", "TestAll")
+//		ss.TestAll.AppendRows(ss.TestAC)
+//		ss.TestAll.AppendRows(ss.TestLure)
+//	}
+func (ss *Sim) OpenPatterns() {
+	ss.OpenPatAsset(ss.TrainEp, "train_ep.tsv", "TrainEp", "Episodic training patterns")
+	ss.OpenPatAsset(ss.TestEarly, "test_early.tsv", "TestEarly", "Early-cue test patterns")
+	ss.OpenPatAsset(ss.TestLate, "test_late.tsv", "TestLate", "Late-cue test patterns")
+	ss.OpenPatAsset(ss.TestLure, "test_lure.tsv", "TestLure", "Lure test patterns")
+
+	ss.TestAll = ss.TestEarly.Clone()
+	ss.TestAll.MetaData["name"] = "TestAll"
+	ss.TestAll.AppendRows(ss.TestLate)
 	ss.TestAll.AppendRows(ss.TestLure)
 }
 
 func (ss *Sim) ConfigPats() {
 	// hp := &ss.Config.Hip
+	cfg := &ss.Config
 	ecY := 3               // hp.EC3NPool.Y
 	ecX := 4               // hp.EC3NPool.X
 	plY := 6               // hp.EC3NNrn.Y // good idea to get shorter vars when used frequently
 	plX := 2               // hp.EC3NNrn.X // makes much more readable
-	npats := 10            // ss.Config.NTrials
+	npats := cfg.NEpisodes // ss.Config.NTrials
+	epLen := cfg.EpLength
+	// nItems := npats * epLen
 	pctAct := float32(.15) // ss.Config.Mod.ECPctAct
 	minDiff := float32(.5) // ss.Config.Pat.MinDiffPct
 	nOn := patgen.NFromPct(pctAct, plY*plX)
-	ctxtFlipPct := float32(0.2)
-	ctxtflip := patgen.NFromPct(ctxtFlipPct, nOn)
-	patgen.AddVocabEmpty(ss.PoolVocab, "empty", npats, plY, plX)
-	patgen.AddVocabPermutedBinary(ss.PoolVocab, "A", npats, plY, plX, pctAct, minDiff)
-	patgen.AddVocabPermutedBinary(ss.PoolVocab, "B", npats, plY, plX, pctAct, minDiff)
-	patgen.AddVocabPermutedBinary(ss.PoolVocab, "C", npats, plY, plX, pctAct, minDiff)
-	patgen.AddVocabPermutedBinary(ss.PoolVocab, "lA", npats, plY, plX, pctAct, minDiff)
-	patgen.AddVocabPermutedBinary(ss.PoolVocab, "lB", npats, plY, plX, pctAct, minDiff)
-	patgen.AddVocabPermutedBinary(ss.PoolVocab, "ctxt", 3, plY, plX, pctAct, minDiff) // totally diff
-
-	for i := 0; i < (ecY-1)*ecX*3; i++ { // 12 contexts! 1: 1 row of stimuli pats; 3: 3 diff ctxt bases
-		list := i / ((ecY - 1) * ecX)
-		ctxtNm := fmt.Sprintf("ctxt%d", i+1)
-		tsr, _ := patgen.AddVocabRepeat(ss.PoolVocab, ctxtNm, npats, "ctxt", list)
-		patgen.FlipBitsRows(tsr, ctxtflip, ctxtflip, 1, 0)
-		//todo: also support drifting
-		//solution 2: drift based on last trial (will require sequential learning)
-		//patgen.VocabDrift(ss.PoolVocab, ss.NFlipBits, "ctxt"+strconv.Itoa(i+1))
+	driftflip := patgen.NFromPct(cfg.CtxtDrift, nOn)
+	if driftflip < 1 {
+		driftflip = 1
 	}
+
+	// DELETE ------------------------------------------------------------
+
+	// nOverlap := int(float32(npats) * cfg.PctOverlap)
+	// ctxtFlipPct := float32(0.2)
+	// ctxtflip := patgen.NFromPct(ctxtFlipPct, nOn)
+	// patgen.AddVocabEmpty(ss.PoolVocab, "empty", npats, plY, plX)
+	// patgen.AddVocabPermutedBinary(ss.PoolVocab, "A", npats, plY, plX, pctAct, minDiff)
+	// patgen.AddVocabPermutedBinary(ss.PoolVocab, "B", npats, plY, plX, pctAct, minDiff)
+	// patgen.AddVocabPermutedBinary(ss.PoolVocab, "C", npats, plY, plX, pctAct, minDiff)
+	// patgen.AddVocabPermutedBinary(ss.PoolVocab, "lA", npats, plY, plX, pctAct, minDiff)
+	// patgen.AddVocabPermutedBinary(ss.PoolVocab, "lB", npats, plY, plX, pctAct, minDiff)
+	// patgen.AddVocabPermutedBinary(ss.PoolVocab, "ctxt", 3, plY, plX, pctAct, minDiff) // totally diff
+
+	// patgen.AddVocabPermutedBinary(ss.PoolVocab, "A", npats, plY, plX, pctAct, minDiff)
+	// patgen.AddVocabPermutedBinary(ss.PoolVocab, "B", npats, plY, plX, pctAct, minDiff)
+	// patgen.AddVocabPermutedBinary(ss.PoolVocab, "C", npats, plY, plX, pctAct, minDiff)
+	// patgen.AddVocabPermutedBinary(ss.PoolVocab, "EpCtxt", npats, plY, plX, pctAct, minDiff)
+
+	//  ------------------------------------------------------------
+
+	//episode base context
+	patgen.AddVocabPermutedBinary(ss.PoolVocab, "epCtxt", npats, plY, plX, pctAct, minDiff)
+	//lure
+	patgen.AddVocabPermutedBinary(ss.PoolVocab, "lure", npats, plY, plX, pctAct, minDiff)
+	//empty pool
+	patgen.AddVocabEmpty(ss.PoolVocab, "empty", npats, plY, plX)
+	patgen.AddVocabRepeat(ss.PoolVocab, "ctxt_t0", npats, "epCtxt", 0)
+
+	// DELETE ------------------------------------------------------------
+
+	//drifting context tensors for temporal positions
+	// ctxt_t = epCtxt (base)
+
+	// for i := 0; i < (ecY-1)*ecX*3; i++ { // 12 contexts! 1: 1 row of stimuli pats; 3: 3 diff ctxt bases
+	// 	list := i / ((ecY - 1) * ecX)
+	// 	ctxtNm := fmt.Sprintf("ctxt%d", i+1)
+	// 	tsr, _ := patgen.AddVocabRepeat(ss.PoolVocab, ctxtNm, npats, "ctxt", list)
+	// 	patgen.FlipBitsRows(tsr, driftflip, driftflip, 1, 0)
+	// 	//todo: also support drifting
+	// 	//solution 2: drift based on last trial (will require sequential learning)
+	// 	//patgen.VocabDrift(ss.PoolVocab, ss.NFlipBits, "ctxt"+strconv.Itoa(i+1))
+	// }
+
+	// for t := 0; t < epLen; t++ {
+	// 	ctxtNm := fmt.Sprint("ctxt_t%d", t)
+	// 	if t == 0 {
+	// 		patgen.AddVocabRepeat(ss.PoolVocab, ctxtNm, npats, "epCtxt", 0)
+	// 	} else {
+	// 		prevNm := fmt.Sprintf("ctxt_t%d", t-1)
+	// 		tsr, _ := patgen.AddVocabRepeat(ss.PoolVocab, ctxtNm, npats, prevNm, 0)
+	// 		patgen.FlipBitsRows(tsr, driftflip, driftflip, 1, 0)
+	// 	}
+	// }
+
+	// DELETE ------------------------------------------------------------
+
+	for t := 0; t < epLen; t++ {
+		patgen.AddVocabPermutedBinary(ss.PoolVocab, fmt.Sprintf("item_t%d", t), npats, plY, plX, pctAct, minDiff)
+	}
+
+	for t := 1; t < epLen; t++ {
+		prev := fmt.Sprintf("ctxt_t%d", t-1)
+		curr := fmt.Sprintf("ctxt_t%d", t)
+		tsr, _ := patgen.AddVocabRepeat(ss.PoolVocab, curr, npats, prev, 0)
+		patgen.FlipBitsRows(tsr, driftflip, driftflip, 1, 0)
+
+	}
+
+	patgen.AddVocabPermutedBinary(ss.PoolVocab, "lureCtxt", npats, plY, plX, pctAct, minDiff)
+
+	//helper function for pooling
+	poolList := func(itemVocab, ctxtVocab string) []string {
+		pools := make([]string, ecY*ecX)
+		for i := range pools {
+			pools[i] = "empty"
+		}
+		pools[0] = itemVocab
+		pools[1] = ctxtVocab
+		return pools
+	}
+
+	//TRAINING TABLE
+	firstStep := &table.Table{}
+	patgen.InitPats(firstStep, "TrainEp_t0t1", "Episodic training t0->t1", "Input", "ECout", npats, ecY, ecX, plY, plX)
+	patgen.MixPats(firstStep, ss.PoolVocab, "Input", poolList("item_t0", "ctxt_t0"))
+	patgen.MixPats(firstStep, ss.PoolVocab, "ECout", poolList("item_t1", "ctxt_t1"))
+	setStepNames(firstStep, npats, 0)
+
+	ss.TrainEp = firstStep.Clone()
+	ss.TrainEp.MetaData["name"] = "Train Ep"
+	ss.TrainEp.MetaData["desc"] = "All Episodic Training Transitions"
+
+	for t := 1; t < epLen-1; t++ {
+		step := &table.Table{}
+		patgen.InitPats(step,
+			fmt.Sprintf("TrainEp_t%dt%d", t, t+1),
+			fmt.Sprintf("Episodic training t%d->t%d", t, t+1),
+			"Input", "ECout", npats, ecY, ecX, plY, plX)
+
+		patgen.MixPats(step, ss.PoolVocab, "Input",
+			poolList(fmt.Sprintf("item_t%d", t), fmt.Sprintf("ctxt_t%d", t)))
+		patgen.MixPats(step, ss.PoolVocab, "ECout",
+			poolList(fmt.Sprintf("item_t%d", t+1), fmt.Sprintf("ctxt_t%d", t+1)))
+
+		setStepNames(step, npats, t)
+		ss.TrainEp.AppendRows(step)
+	}
+
+	//TESTING TABLES
+	//test early (first item cue, undrifted context)
+	ss.TestEarly = &table.Table{}
+	patgen.InitPats(ss.TestEarly, "TestEarly", "Test with first item cue", "Input", "ECout", npats, ecY, ecX, plY, plX)
+	patgen.MixPats(ss.TestEarly, ss.PoolVocab, "Input", poolList("item_t0", "ctxt_t0"))
+	patgen.MixPats(ss.TestEarly, ss.PoolVocab, "ECout", poolList("item_t1", "ctxt_t1"))
+	setTestNames(ss.TestEarly, npats, "early")
+
+	//test later
+	lateT := epLen - 2
+	if lateT < 1 {
+		lateT = 1
+	}
+
+	ss.TestLate = &table.Table{}
+	patgen.InitPats(ss.TestLate, "TestLate", "Test with late item cue", "Input", "ECout", npats, ecY, ecX, plY, plX)
+	patgen.MixPats(ss.TestLate, ss.PoolVocab, "Input", poolList(fmt.Sprintf("item_t%d", lateT), fmt.Sprintf("ctxt_t%d", lateT)))
+	patgen.MixPats(ss.TestLate, ss.PoolVocab, "ECout", poolList(fmt.Sprintf("item_t%d", lateT+1), fmt.Sprintf("ctxt_t%d", lateT+1)))
+	setTestNames(ss.TestLate, npats, "late")
+
+	//test lure
+	ss.TestLure = &table.Table{}
+	patgen.InitPats(ss.TestLure, "TestLure", "Test Lure", "Input", "ECout", npats, ecY, ecX, plY, plX)
+	patgen.MixPats(ss.TestLure, ss.PoolVocab, "Input", poolList("lure", "lureCtxt"))
+	patgen.MixPats(ss.TestLure, ss.PoolVocab, "ECout", poolList("lure", "lureCtxt"))
+	setTestNames(ss.TestLure, npats, "lure")
+
+	// test all
+	ss.TestAll = ss.TestEarly.Clone()
+	ss.TestAll.MetaData["name"] = "TestAll"
+	ss.TestAll.AppendRows(ss.TestLate)
+	ss.TestAll.AppendRows(ss.TestLure)
+
+	// DELETE ------------------------------------------------------------
+
+	//from round 1 ************************************************************************
+	// // each row is one item presentation in an episode
+	// // layout Input pools is cue pool, item pool, ctxt pool_t0..t3]
+	// // Ecout = full episode pattern
+
+	//totalRows := npats * (epLen - 1) // predict next item, so ep-1 pairs for each episode
+	// patgen.InitPats(ss.TrainEp, "TrainEP", "Episodic Training Pats", "Input", "ECout", totalRows, ecY, ecX, plY, plX)
+
+	// row:=0
+	// for ep:=0; ep<npats; ep++{
+	// 	items :=[]string{"cue", "item1", "item2", "item3"}[:epLen]
+	// 	ctxts := make([]string, epLen)
+	// 	for t:=0; t<epLen; t++{
+	// 		ctxts[t] = fmt.Sprintf("ctxt_t%d",t)
+	// 	}
+	// 	for t:=0; t<epLen; t++{
+	// 		//input is current item + context
+	// 		inputPools := makeEpInputPools(items[t], ctxts[t],epLen, ecY,ecX)
+	// 		//ecout is next item + context
+	// 		targetPools := makeEpInpuPools(items[t+1], ctxts[t+1],epLen, ecY,ecX)
+	// 		patgen.MixPatsRows(ss.TrainEp, ss.PoolVocab, "Input", inputPools, ep, row)
+	// 		patgen.MixPatsRows(ss.PoolVocab, ss.PoolVocab, "ECout", targetPools, ep, row)
+	// 		row++
+
+	// 	}
+	// }
+
+	// //TESTING FIRST ITEM
+	// patgen.InitPats(ss.TestEpFirst, "TesEPFirst", "Test First Item Cue", "Input", "ECout", npats, ecY, ecX, plY, plX)
+
+	// //input: cue + context at t0, rest empty
+	// //ecout: item1 + ctxt_t1 (immediate next — probe recall of what followed)
+
+	// patgen.MixPats(ss.TestEpFirst, ss.PoolVocab, "Input",
+	// 	[]string{"cue","empty","ctxt_t0", "empty","empty","empty"})
+
+	// patgen.MixPats(ss.TestEpFirst, ss.PoolVocab, "ECout",
+	// 	[]string{"item1","empty","ctxt_t0", "ctxt_t1","empty","empty"})
+
+	// //TESTING MIDDLE ITEM CUE
+	// patgen.InitPats(ss.TestEpMidd, "TestEpMidd", "Test Middle Item Cue", "Input", "ECout", npats, ecY, ecX, plY, plX)
+
+	// patgen.MixPats(ss.TestEpMidd, ss.PoolVocab, "Input",
+	// 	[]string{"item1","empty","ctxt_t1", "empty","empty","empty"})
+
+	// patgen.MixPats(ss.TestEpMidd, ss.PoolVocab, "ECout",
+	// 	[]string{"item1","item2","ctxt_t1", "ctxt_t2","empty","empty"})
+
+	// //TEST LURE
+	// patgen.InitPats(ss.TestLure, "TestLure", "Lure Pats", "Input", "ECout", npats, ecY, ecX, plY, plX)
+
+	// patgen.MixPats(ss.TestLure, ss.PoolVocab, "Input",
+	// 	[]string{"lure","empty","ctxt_t0", "empty","empty","empty"})
+
+	// patgen.MixPats(ss.TestLure, ss.PoolVocab, "ECout",
+	// 	[]string{"lure","lure","ctxt_t0", "ctxt_t0","empty","empty"})
+
+	// //COMBINE ALL TESTS
+	// ss.TestAll = ss.TestEpFirst.Clone()
+	// ss.TestAll.MetaData["name"] = "TestAll"
+	// ss.TestAll.MetaData["desc"] = "All Testing Patterns"
+	// ss.TestAll.AppendRows(ss.TestEpMidd)
+	// ss.TestAll.AppendRows(ss.TestLure)
+
+	// //TRAINING POOL
+	// ss.TrainAll = ss.TrainEp.Clone()
+	// ss.TrainAll.MetaData["name"] = "TrainAll"
+	// ss.TrainAll.MetaData["desc"] = "All Training Patterns"
+
+	// _ = nShared //WHAT IS THIS
+
+	// DELETE ------------------------------------------------------------
+
+	//************************************************************************************************
 
 	patgen.InitPats(ss.TrainAB, "TrainAB", "TrainAB Pats", "Input", "ECout", npats, ecY, ecX, plY, plX)
 	patgen.MixPats(ss.TrainAB, ss.PoolVocab, "Input", []string{"A", "B", "ctxt1", "ctxt2", "ctxt3", "ctxt4"})
@@ -656,6 +909,38 @@ func (ss *Sim) ConfigPats() {
 	ss.TestAll.MetaData["desc"] = "All Testing Patterns"
 }
 
+// set step names function
+func setStepNames(dt *table.Table, npats int, stepT int) {
+	for ep := 0; ep < npats; ep++ {
+		dt.SetString("Name", ep, fmt.Sprintf("ep%d_t%d", ep, stepT))
+	}
+}
+
+// set test names function
+func setTestNames(dt *table.Table, npats int, prefix string) {
+	for ep := 0; ep < npats; ep++ {
+		dt.SetString("Name", ep, fmt.Sprintf("%s_ep%d", prefix, ep))
+	}
+}
+
+// saving patterns
+func (ss *Sim) SavePatterns() {
+	tables := map[string]*table.Table{
+		"train_ep.tsv":   ss.TrainEp,
+		"test_early.tsv": ss.TestEarly,
+		"test_late.tsv":  ss.TestLate,
+		"test_lure.tsv":  ss.TestLure,
+	}
+
+	for fname, dt := range tables {
+		if err := dt.SaveCSV(core.Filename(fname), table.Tab, true); err != nil {
+			fmt.Printf("SavePatterns: error saving %s: %v\n", fname, err)
+		} else {
+			fmt.Printf("SavePatterns: saved %s (%d rows)\n", fname, dt.Rows)
+		}
+	}
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////
 // 		Stats
 
@@ -663,13 +948,20 @@ func (ss *Sim) ConfigPats() {
 // called at start of new run
 func (ss *Sim) InitStats() {
 	ss.Stats.SetString("TrialName", "")
-	ss.Stats.SetFloat("TrgOnWasOffAll", 0.0)
-	ss.Stats.SetFloat("TrgOnWasOffCmp", 0.0)
-	ss.Stats.SetFloat("TrgOffWasOn", 0.0)
-	ss.Stats.SetFloat("ABMem", 0.0)
-	ss.Stats.SetFloat("ACMem", 0.0)
+	// DELETE ------------------------------------------------------------
+	// ss.Stats.SetFloat("TrgOnWasOffAll", 0.0)
+	// ss.Stats.SetFloat("TrgOnWasOffCmp", 0.0)
+	// ss.Stats.SetFloat("TrgOffWasOn", 0.0)
+	// ss.Stats.SetFloat("ABMem", 0.0)
+	// ss.Stats.SetFloat("ACMem", 0.0)
+	// ss.Stats.SetFloat("LureMem", 0.0)
+	// ss.Stats.SetFloat("Mem", 0.0)
+	// DELETE ------------------------------------------------------------
+	ss.Stats.SetFloat("FirstItemMem", 0.0)
+	ss.Stats.SetFloat("MidItemMem", 0.0)
+	// ss.Stats.SetFloat("OrderMem", 0.0)
 	ss.Stats.SetFloat("LureMem", 0.0)
-	ss.Stats.SetFloat("Mem", 0.0)
+
 	ss.Stats.SetInt("FirstPerfect", -1) // first epoch at when AB Mem is perfect
 
 	ss.Logs.InitErrStats() // inits TrlErr, FirstZero, LastZero, NZero
@@ -727,13 +1019,21 @@ func (ss *Sim) MemStats(mode etime.Modes) {
 	actMi, _ := ecout.UnitVarIndex("ActM")
 	targi, _ := ecout.UnitVarIndex("Targ")
 
-	ss.Stats.SetFloat("ABMem", math.NaN())
-	ss.Stats.SetFloat("ACMem", math.NaN())
+	// ss.Stats.SetFloat("ABMem", math.NaN())
+	// ss.Stats.SetFloat("ACMem", math.NaN())
+	// ss.Stats.SetFloat("LureMem", math.NaN())
+
+	ss.Stats.SetFloat("FirstItemMem", math.NaN())
+	ss.Stats.SetFloat("MidItemMem", math.NaN())
 	ss.Stats.SetFloat("LureMem", math.NaN())
 
 	trialnm := ss.Stats.String("TrialName")
-	isAB := strings.Contains(trialnm, "ab")
-	isAC := strings.Contains(trialnm, "ac")
+	//delete -------
+	// isAB := strings.Contains(trialnm, "ab")
+	// isAC := strings.Contains(trialnm, "ac")
+	//-------
+	isEarly := strings.Contains(trialnm, "early")
+	isLate := strings.Contains(trialnm, "late")
 
 	for ni := 0; ni < nn; ni++ {
 		actm := ecout.UnitValue1D(actMi, ni, 0)
@@ -776,13 +1076,24 @@ func (ss *Sim) MemStats(mode etime.Modes) {
 			mem = 1.0
 		}
 		ss.Stats.SetFloat("Mem", mem)
+		// DELETE ------------------------------------------------------------
+		// switch {
+		// case isAB:
+		// 	ss.Stats.SetFloat("ABMem", mem)
+		// case isAC:
+		// 	ss.Stats.SetFloat("ACMem", mem)
+		// default:
+		// 	ss.Stats.SetFloat("LureMem", mem)
+		// }
+		// DELETE ------------------------------------------------------------
 		switch {
-		case isAB:
-			ss.Stats.SetFloat("ABMem", mem)
-		case isAC:
-			ss.Stats.SetFloat("ACMem", mem)
+		case isEarly:
+			ss.Stats.SetFloat("FirstItemMem", mem)
+		case isLate:
+			ss.Stats.SetFloat("MiddItemMem", mem)
 		default:
 			ss.Stats.SetFloat("LureMem", mem)
+
 		}
 
 	}
@@ -805,13 +1116,24 @@ func (ss *Sim) RunStats() {
 
 	st.SetMetaData("Points", "true")
 
-	st.SetMetaData("TstABMem:Mean:On", "+")
-	st.SetMetaData("TstABMem:Mean:FixMin", "true")
-	st.SetMetaData("TstABMem:Mean:FixMax", "true")
-	st.SetMetaData("TstABMem:Mean:Min", "0")
-	st.SetMetaData("TstABMem:Mean:Max", "1")
-	st.SetMetaData("TstABMem:Min:On", "+")
-	st.SetMetaData("TstABMem:Count:On", "-")
+	// DELETE ------------------------------------------------------------
+	// st.SetMetaData("TstABMem:Mean:On", "+")
+	// st.SetMetaData("TstABMem:Mean:FixMin", "true")
+	// st.SetMetaData("TstABMem:Mean:FixMax", "true")
+	// st.SetMetaData("TstABMem:Mean:Min", "0")
+	// st.SetMetaData("TstABMem:Mean:Max", "1")
+	// st.SetMetaData("TstABMem:Min:On", "+")
+	// st.SetMetaData("TstABMem:Count:On", "-")
+	// DELETE ------------------------------------------------------------
+
+	split.DescColumn(spl, "TstFirstItemMem")
+	st.SetMetaData("TstFirstItemMem:Mean:On", "+")
+	st.SetMetaData("TstFirstItemMem:Mean:FixMin", "true")
+	st.SetMetaData("TstFirstItemMem:Mean:FixMax", "true")
+	st.SetMetaData("TstFirstItemMem:Mean:Min", "0")
+	st.SetMetaData("TstFirstItemMem:Mean:Max", "1")
+	st.SetMetaData("TstFirstItemMem:Min:On", "+")
+	st.SetMetaData("TstFirstItemMem:Count:On", "-")
 
 	plt.SetTable(st)
 	plt.GoUpdatePlot()
@@ -821,7 +1143,8 @@ func (ss *Sim) RunStats() {
 // 		Logging
 
 func (ss *Sim) AddLogItems() {
-	itemNames := []string{"TrgOnWasOffAll", "TrgOnWasOffCmp", "TrgOffWasOn", "Mem", "ABMem", "ACMem", "LureMem"}
+	// itemNames := []string{"TrgOnWasOffAll", "TrgOnWasOffCmp", "TrgOffWasOn", "Mem", "ABMem", "ACMem", "LureMem"}
+	itemNames := []string{"TrgOnWasOffAll", "TrgOnWasOffCmp", "TrgOffWasOn", "Mem", "FirstItemMem", "MidItemMem", "LureMem"}
 	for _, st := range itemNames {
 		stnm := st
 		tonm := "Tst" + st
@@ -850,8 +1173,10 @@ func (ss *Sim) ConfigLogs() {
 	ss.Logs.AddStatAggItem("TrgOnWasOffAll", etime.Run, etime.Epoch, etime.Trial)
 	ss.Logs.AddStatAggItem("TrgOnWasOffCmp", etime.Run, etime.Epoch, etime.Trial)
 	ss.Logs.AddStatAggItem("TrgOffWasOn", etime.Run, etime.Epoch, etime.Trial)
-	ss.Logs.AddStatAggItem("ABMem", etime.Run, etime.Epoch, etime.Trial)
-	ss.Logs.AddStatAggItem("ACMem", etime.Run, etime.Epoch, etime.Trial)
+	// ss.Logs.AddStatAggItem("ABMem", etime.Run, etime.Epoch, etime.Trial)
+	// ss.Logs.AddStatAggItem("ACMem", etime.Run, etime.Epoch, etime.Trial)
+	ss.Logs.AddStatAggItem("FirstItemMem", etime.Run, etime.Epoch, etime.Trial)
+	ss.Logs.AddStatAggItem("MidItemMem", etime.Run, etime.Epoch, etime.Trial)
 	ss.Logs.AddStatAggItem("LureMem", etime.Run, etime.Epoch, etime.Trial)
 	ss.Logs.AddStatAggItem("Mem", etime.Run, etime.Epoch, etime.Trial)
 	ss.Logs.AddStatIntNoAggItem(etime.Train, etime.Run, "FirstPerfect")
@@ -870,24 +1195,29 @@ func (ss *Sim) ConfigLogs() {
 	ss.Logs.AddLayerTensorItems(ss.Net, "ActM", etime.Test, etime.Trial, "TargetLayer")
 	ss.Logs.AddLayerTensorItems(ss.Net, "Act", etime.Test, etime.Trial, "TargetLayer")
 
-	ss.Logs.PlotItems("ABMem", "ACMem", "LureMem")
+	// ss.Logs.PlotItems("ABMem", "ACMem", "LureMem")
+	ss.Logs.PlotItems("FirstItemMem", "MidItemMem", "LureMem")
 
 	// ss.Logs.PlotItems("TrgOnWasOffAll", "TrgOnWasOffCmp", "ABMem", "ACMem", "TstTrgOnWasOffAll", "TstTrgOnWasOffCmp", "TstMem", "TstABMem", "TstACMem")
 
 	ss.Logs.CreateTables()
 	ss.Logs.SetMeta(etime.Train, etime.Run, "TrgOnWasOffAll:On", "-")
 	ss.Logs.SetMeta(etime.Train, etime.Run, "TrgOnWasOffCmp:On", "-")
-	ss.Logs.SetMeta(etime.Train, etime.Run, "ABMem:On", "-")
-	ss.Logs.SetMeta(etime.Train, etime.Run, "ACMem:On", "-")
-	ss.Logs.SetMeta(etime.Train, etime.Run, "LureMem:On", "-")
+	// ss.Logs.SetMeta(etime.Train, etime.Run, "ABMem:On", "-")
+	// ss.Logs.SetMeta(etime.Train, etime.Run, "ACMem:On", "-")
+	ss.Logs.SetMeta(etime.Train, etime.Run, "TstFirstItemMem:On", "+")
+	ss.Logs.SetMeta(etime.Train, etime.Run, "TstMidItemMem:On", "+")
+	ss.Logs.SetMeta(etime.Train, etime.Run, "TstLureMem:On", "+")
 	ss.Logs.SetMeta(etime.Train, etime.Run, "TstTrgOnWasOffAll:On", "-")
 	ss.Logs.SetMeta(etime.Train, etime.Run, "TstTrgOnWasOffCmp:On", "-")
-	ss.Logs.SetMeta(etime.Train, etime.Run, "TstABMem:On", "+")
-	ss.Logs.SetMeta(etime.Train, etime.Run, "TstACMem:On", "+")
+	// ss.Logs.SetMeta(etime.Train, etime.Run, "TstABMem:On", "+")
+	// ss.Logs.SetMeta(etime.Train, etime.Run, "TstACMem:On", "+")
 	ss.Logs.SetMeta(etime.Train, etime.Run, "TstLureMem:On", "+")
 	ss.Logs.SetMeta(etime.Train, etime.Run, "Type", "Bar")
-	ss.Logs.SetMeta(etime.Train, etime.Epoch, "ABMem:On", "-")
-	ss.Logs.SetMeta(etime.Train, etime.Epoch, "ACMem:On", "-")
+	// ss.Logs.SetMeta(etime.Train, etime.Epoch, "ABMem:On", "-")
+	// ss.Logs.SetMeta(etime.Train, etime.Epoch, "ACMem:On", "-")
+	ss.Logs.SetMeta(etime.Train, etime.Epoch, "FirstItemMem:On", "-")
+	ss.Logs.SetMeta(etime.Train, etime.Epoch, "MidItemMem:On", "-")
 	ss.Logs.SetMeta(etime.Train, etime.Epoch, "LureMem:On", "-")
 	ss.Logs.SetMeta(etime.Train, etime.Epoch, "Mem:On", "+")
 	ss.Logs.SetMeta(etime.Train, etime.Epoch, "TrgOnWasOffAll:On", "+")
